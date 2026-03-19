@@ -2,7 +2,7 @@
 <html>
 <head>
 <meta charset="UTF-8">
-<title>全身自撮りカメラ 背景透明 PNG</title>
+<title>全身自撮りカメラ 完全版</title>
 <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-core"></script>
 <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-converter"></script>
 <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-cpu"></script>
@@ -29,7 +29,7 @@ body{margin:0;font-family:sans-serif;background:#222;color:white;text-align:cent
 </head>
 <body>
 
-<h1>全身自撮りカメラ 背景透明 PNG</h1>
+<h1>全身自撮りカメラ 完全版</h1>
 
 <div class="camera-container">
   <video id="video" autoplay muted playsinline></video>
@@ -81,7 +81,7 @@ async function initCamera(){
 
   try{
     await tf.setBackend('cpu'); await tf.ready();
-    model=await bodyPix.load();
+    model=await bodyPix.load({architecture:'MobileNetV1',outputStride:16, multiplier:0.75});
     updateProgress(50);
   }catch(e){ showError("E004","BodyPixモデル読み込み失敗: "+e.message); progressContainer.style.display='none'; return; }
 
@@ -95,14 +95,16 @@ async function detectLoop(){
 
   if(!model) return;
 
-  const segmentation=await model.segmentPerson(video);
-  const mask=bodyPix.toMask(segmentation);
+  try{
+    const segmentation=await model.segmentPerson(video);
+    const mask=bodyPix.toMask(segmentation);
+    overlayCtx.putImageData(mask,0,0);
 
-  overlayCtx.putImageData(mask,0,0);
+    const anyPerson=segmentation.data.some(v=>v>0);
+    if(!anyPerson){ warning.textContent="⚠️ 被写体が見つかりません"; }
+    else{ warning.textContent=""; message.textContent="被写体検出中..."; }
 
-  const anyPerson=segmentation.data.some(v=>v>0);
-  if(!anyPerson){ warning.textContent="⚠️ 被写体が見つかりません"; }
-  else{ warning.textContent=""; message.textContent="被写体検出中..."; }
+  }catch(e){ showError("E004","被写体検出失敗: "+e.message); }
 
   requestAnimationFrame(detectLoop);
 }
@@ -119,12 +121,11 @@ async function captureAndCrop(){
     updateProgress(60);
 
     snapCtx.clearRect(0,0,snapshot.width,snapshot.height);
-    const mask=bodyPix.toMask(segmentation);
-    snapCtx.save();
     snapCtx.drawImage(video,0,0,snapshot.width,snapshot.height);
     snapCtx.globalCompositeOperation='destination-in';
+    const mask=bodyPix.toMask(segmentation);
     snapCtx.putImageData(mask,0,0);
-    snapCtx.restore();
+    snapCtx.globalCompositeOperation='source-over';
     updateProgress(100);
 
     const link=document.createElement('a');

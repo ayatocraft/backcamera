@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>被写体自動切り取りカメラ 完全版</title>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-core"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-converter"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/blazeface"></script>
+<style>
+  body{margin:0; font-family:sans-serif; text-align:center; background:#222; color:white;}
+  .camera-container{position:relative; display:inline-block;}
+  #video{width:100vw; max-width:800px; height:auto; border:1px solid #333; background:black;}
+  #overlay{position:absolute; top:0; left:0; width:100%; height:100%;}
+  #dark-overlay{position:absolute; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.5); display:none; z-index:5; display:flex; align-items:center; justify-content:center; flex-direction:column;}
+  #progress-container{width:80%; max-width:600px; height:20px; border:1px solid #333; background:#555; display:none;}
+  #progress-bar{width:0%; height:100%; background:lime; transition:width 0.2s;}
+  #capture-btn{position:absolute; bottom:20px; left:50%; transform:translateX(-50%); z-index:10; background:rgba(255,255,255,0.8); border:none; border-radius:50%; width:60px; height:60px; cursor:pointer; display:flex; align-items:center; justify-content:center;}
+  #capture-btn:active{background:rgba(255,255,255,1);}
+  #capture-icon{width:30px; height:30px; background:red; border-radius:50%;}
+  #message{color:lime; font-weight:bold; margin-top:5px;}
+  #warning{color:yellow; font-weight:bold; margin-top:2px;}
+  #error{color:white; background:darkred; padding:8px; font-weight:bold; margin-top:5px; display:none;}
+</style>
+</head>
+<body>
+
+<h1>被写体自動切り取りカメラ</h1>
+
+<div class="camera-container">
+  <video id="video" autoplay muted playsinline></video>
+  <canvas id="overlay"></canvas>
+  <div id="dark-overlay">
+    <div id="progress-container"><div id="progress-bar"></div></div>
+  </div>
+  <button id="capture-btn"><div id="capture-icon"></div></button>
+</div>
+
+<div id="message"></div>
+<div id="warning"></div>
+<div id="error"></div>
+
+<canvas id="snapshot" width="400" height="300" style="display:none;"></canvas>
+
+<script>
+const video=document.getElementById('video');
+const overlay=document.getElementById('overlay');
+const overlayCtx=overlay.getContext('2d');
+const darkOverlay=document.getElementById('dark-overlay');
+const message=document.getElementById('message');
+const warning=document.getElementById('warning');
+const errorDiv=document.getElementById('error');
+const snapshot=document.getElementById('snapshot');
+const snapCtx=snapshot.getContext('2d');
+const progressContainer=document.getElementById('progress-container');
+const progressBar=document.getElementById('progress-bar');
+const captureBtn=document.getElementById('capture-btn');
+
+let model;
+
+function showError(code,msg){ errorDiv.textContent=code+": "+msg; errorDiv.style.display='block'; }
+function hideError(){ errorDiv.style.display='none'; }
+function updateProgress(p){ progressBar.style.width=p+'%'; }
+
+async function initCamera(){
+  hideError();
+  progressContainer.style.display="block"; updateProgress(0);
+  try{
+    const stream = await navigator.mediaDevices.getUserMedia({video:{facingMode:'environment'}});
+    video.srcObject = stream; await video.play();
+    updateProgress(20);
+  }catch(e){
+    showError("E001","カメラにアクセスできません: "+e.message);
+    progressContainer.style.display="none"; return;
+  }
+
+  try{
+    // ★ CPU backend を強制（iPhone Safari 対策）
+    await tf.setBackend('cpu');
+    await tf.ready();
+    model = await blazeface.load({returnTensors:false});
+    updateProgress(50);
+  }catch(e){
+    showError("E002","モデル読み込み失敗: "+e.message);
+    progressContainer.style.display="none"; return;
+  }
+
+  hideError();
+  progressContainer.style.display="none";
+  detectLoop();
+}
+
+async function detectLoop(){
+  if(!model) return;
+  overlay.width=video.clientWidth; overlay.height=video.clientHeight;
+  const predictions=await model.estimateFaces(video,false);
+  overlayCtx.clearRect(0,0,overlay.width,overlay.height);
+
+  if(predictions.length>0){
+    hideError();
+    message.textContent="被写体検出中..."; warning.textContent="";
+    let target=predictions[0]; let maxArea=0;
+    predictions.forEach(pred=>{
+      const w=pred.bottomRight[0]-pred.topLeft[0];
+      const h=pred.bottomRight[1]-pred.topLeft[1];
+      if(w*h>maxArea){ maxArea=w*h; target=pred; }
+    });
+    const [x1,y1]=target.topLeft.map(v=>Math.round(v));
+    const [x2,y2]=target.bottomRight.map(v=>Math.round(v));
+    const w=x2-x1,h=y2-y1;
+    overlayCtx.strokeStyle='lime'; overlayCtx.lineWidth=3;
+    overlayCtx.strokeRect(x1,y1,w,h);
+
+    // 中央警告
+    const centerX=x1+w/2, centerY=y1+h/2;
+    const videoCenterX=overlay.width/2, videoCenterY=overlay.height/2;
+    const offset=100;
+    if(Math.abs(centerX-videoCenterX)>offset || Math.abs(centerY-videoCenterY)>offset){
+      warning.textContent="⚠️ 被写体が中央にありません";
+    }
+  }else{
+    message.textContent=""; warning.textContent="⚠️ 被写体が見つかりません";
+  }
+  requestAnimationFrame(detectLoop);
+}
+
+async function captureAndCrop(){
+  hideError();
+  darkOverlay.style.display='flex';
+  progressContainer.style.display='block'; updateProgress(0);
+  message.textContent="切り取り中...";
+  if(!model){ showError("E002","モデルが読み込まれていません"); darkOverlay.style.display='none'; return; }
+
+  try{
+    const predictions=await model.estimateFaces(video,false);
+    if(predictions.length===0){
+      warning.textContent="⚠️ 被写体が見つかりません";
+      darkOverlay.style.display='none'; progressContainer.style.display='none'; return;
+    }
+    updateProgress(50);
+    let target=predictions[0]; let maxArea=0;
+    predictions.forEach(pred=>{
+      const [x1,y1]=pred.topLeft; const [x2,y2]=pred.bottomRight;
+      const area=(x2-x1)*(y2-y1); if(area>maxArea){ maxArea=area; target=pred; }
+    });
+    const [x1,y1]=target.topLeft.map(v=>Math.round(v));
+    const [x2,y2]=target.bottomRight.map(v=>Math.round(v));
+    const w=x2-x1,h=y2-y1;
+
+    snapCtx.clearRect(0,0,snapshot.width,snapshot.height);
+    snapCtx.drawImage(video,x1,y1,w,h,0,0,snapshot.width,snapshot.height);
+
+    updateProgress(100);
+    message.textContent="切り取り完了。自動保存しました。";
+    
+    const link=document.createElement('a');
+    link.href=snapshot.toDataURL('image/png');
+    link.download='cropped.png';
+    link.click();
+
+    message.textContent+=" (iPhoneは長押しで保存してください)";
+    setTimeout(()=>{darkOverlay.style.display='none'; progressContainer.style.display='none';},500);
+
+  }catch(e){
+    showError("E003","切り取りに失敗しました: "+e.message);
+    darkOverlay.style.display='none'; progressContainer.style.display='none';
+  }
+}
+
+captureBtn.addEventListener('click',captureAndCrop);
+initCamera();
+</script>
+</body>
+</html>
